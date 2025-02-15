@@ -1,0 +1,25 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+aws-cdk-lib = "==2.178.2"
+constructs = ">=10.0.0,<11.0.0"
+
+[dev-packages]
+black = "*"
+pytest = "*"
+isort = "*"
+flake8 = "*"
+flake8-bandit = "*"
+
+[requires]
+python_version = "3.13"
+
+[scripts]
+unittest = "pytest --no-cov"
+coverage = "pytest --cov-report=term"
+lint = "bash -c 'flake8 web_app'"
+format = "bash -c 'isort web_app && black web_app'"
+checkformat = "bash -c 'isort web_app --check && black web_app --check'"
