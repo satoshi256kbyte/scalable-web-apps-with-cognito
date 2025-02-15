@@ -1,4 +1,4 @@
-from aws_cdk import Stack
+from aws_cdk import Stack, Tags
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_elasticloadbalancingv2 as elb
 from aws_cdk import aws_elasticloadbalancingv2_targets as tg
@@ -9,45 +9,51 @@ from constructs import Construct
 
 class WebAppStack(Stack):
 
+    app_name: str
+    stage: str
+
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # EC2のキーペア名を外部から指定
+        app_name: str = self.node.try_get_context("app_name")
+        if app_name is None:
+            app_name = "web-app"
+        stage = app_name.lower()
+
+        stage: str = self.node.try_get_context("stage")
+        if stage is None:
+            raise ValueError("stage is required")
+        stage = stage.lower()
+
         key_pair_param: str = self.node.try_get_context("key_pair")
         if key_pair_param is None:
             raise ValueError("key_pair is required")
 
-        # EC2用のインスタンスプロファイル
-        # セッションマネージャーを使うためのマネージドポリシーをアタッチ
-        instance_profile = iam.Role(
-            self,
-            "ec2_profile",
-            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-            description="for instance profile",
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonSSMManagedInstanceCore"
-                ),
-            ],
-        )
+        # 全体にタグを付与
+        Tags.of(self).add("app_name", app_name)
+        Tags.of(self).add("stage", stage)
 
         # VPC
         # パブリックサブネット、NATゲートウェイに接続したプライベートサブネット、DB用のプライベートサブネットを作成
         # DB用のプライベートサブネットはNATゲートウェイには接続しない
         vpc = ec2.Vpc(
             self,
-            "web_vpc",
+            id=f"{app_name}_{stage}_vpc",
+            vpc_name=f"{app_name}-{stage}-vpc",
             max_azs=2,
             nat_gateways=1,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
-                    name="public_subnet", subnet_type=ec2.SubnetType.PUBLIC
+                    name=f"{app_name}-{stage}-public-subnet",
+                    subnet_type=ec2.SubnetType.PUBLIC,
                 ),
                 ec2.SubnetConfiguration(
-                    name="protected_subnet", subnet_type=ec2.SubnetType.PRIVATE_WITH_NAT
+                    name=f"{app_name}-{stage}-protected-subnet",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_NAT,
                 ),
                 ec2.SubnetConfiguration(
-                    name="db_subnet", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
+                    name=f"{app_name}-{stage}-private-subnet",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
                 ),
             ],
         )
@@ -55,7 +61,8 @@ class WebAppStack(Stack):
         # ALB、EC2、RDSそれぞれのセキュリティグループ
         alb_sg = ec2.SecurityGroup(
             self,
-            "alb_sg",
+            id=f"{app_name}_{stage}_alb_sg",
+            security_group_name=f"{app_name}-{stage}-alb-sg",
             vpc=vpc,
             allow_all_outbound=True,
         )
@@ -65,7 +72,8 @@ class WebAppStack(Stack):
         )
         ec2_sg = ec2.SecurityGroup(
             self,
-            "ec2_sg",
+            id=f"{app_name}_{stage}_web_ec2_sg",
+            security_group_name=f"{app_name}-{stage}-web-ec2-sg",
             vpc=vpc,
             allow_all_outbound=True,
         )
@@ -75,7 +83,8 @@ class WebAppStack(Stack):
         )
         rds_sg = ec2.SecurityGroup(
             self,
-            "rds_sg",
+            id=f"{app_name}_{stage}_rds_sg",
+            security_group_name=f"{app_name}-{stage}-rds-sg",
             vpc=vpc,
             allow_all_outbound=True,
         )
@@ -84,31 +93,60 @@ class WebAppStack(Stack):
             connection=ec2.Port.tcp(3306),
         )
 
-        # EC2
-        # WEBサーバー用に2台起動
-        ec2_instance_1 = ec2.Instance(
+        # EC2用のインスタンスプロファイル
+        # セッションマネージャーを使うためのマネージドポリシーをアタッチ
+        instance_profile: iam.Role = iam.Role(
             self,
-            "web_ec2_instance_1",
-            vpc=vpc,
-            instance_type=ec2.InstanceType.of(
-                ec2.InstanceClass.T3A, ec2.InstanceSize.MICRO
-            ),
-            machine_image=ec2.MachineImage.latest_amazon_linux(
-                generation=ec2.AmazonLinuxGeneration.AMAZON_LINUX_2023
-            ),
-            instance_name="web-instance",
-            key_name=key_pair_param,
-            block_devices=[
-                ec2.BlockDevice(
-                    device_name="/dev/xvda", volume=ec2.BlockDeviceVolume.ebs(10)
-                )
+            id=f"{app_name}_{stage}_web_ec2_role",
+            role_name=f"{app_name}-{stage}-web-ec2-role",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            description="for instance profile",
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "AmazonSSMManagedInstanceCore"
+                ),
             ],
-            role=instance_profile,
-            security_group=ec2_sg,
         )
-        ec2_instance_2 = ec2.Instance(
+
+        # EC2はALB配下に2つ設置するのでEC2を2台起動
+        ec2_instance_1 = self.create_web_ec2_instance(
+            app_name, stage, "1", vpc, instance_profile, ec2_sg
+        )
+        ec2_instance_2 = self.create_web_ec2_instance(
+            app_name, stage, "2", vpc, instance_profile, ec2_sg
+        )
+
+        _ = self.create_rds_instance(app_name, stage, vpc, rds_sg)
+        _ = self.create_alb(app_name, stage, vpc, [ec2_instance_1, ec2_instance_2])
+
+    def create_web_ec2_instance(
+        self,
+        app_name: str,
+        stage: str,
+        suffix: str,
+        vpc: ec2.Vpc,
+        instance_profile: iam.Role,
+        ec2_sg: ec2.SecurityGroup,
+    ) -> ec2.Instance:
+        """Webサーバー用のEC2インスタンスを作成する
+
+        Args:
+            app_name (str): アプリケーション名
+            stage (str): ステージ名
+            vpc (ec2.Vpc): VPC
+            suffix (str): インスタンス名のサフィックス
+            instance_profile (iam.Role): インスタンスプロファイル
+            ec2_sg (ec2.SecurityGroup): EC2インスタンス用のセキュリティグループ
+        Returns:
+            ec2.SecurityGroup: EC2インスタンス
+        """
+
+        key_pair_param: str = self.node.try_get_context("key_pair")
+
+        return ec2.Instance(
             self,
-            "web_ec2_instance_2",
+            id=f"{app_name}_{stage}_web_ec2_{suffix}",
+            instance_name=f"{app_name}-{stage}-web-ec2-{suffix}",
             vpc=vpc,
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.T3A, ec2.InstanceSize.MICRO
@@ -116,7 +154,6 @@ class WebAppStack(Stack):
             machine_image=ec2.MachineImage.latest_amazon_linux(
                 generation=ec2.AmazonLinuxGeneration.AMAZON_LINUX_2023
             ),
-            instance_name="web-instance",
             key_name=key_pair_param,
             block_devices=[
                 ec2.BlockDevice(
@@ -127,20 +164,41 @@ class WebAppStack(Stack):
             security_group=ec2_sg,
         )
 
+    # RDSインスタンスを作るメソッド
+    def create_rds_instance(
+        self,
+        app_name: str,
+        stage: str,
+        vpc: ec2.Vpc,
+        rds_sg: ec2.SecurityGroup,
+    ) -> rds.DatabaseInstance:
+        """RDSインスタンスを作成する
+
+        Args:
+            app_name (str): アプリケーション名
+            stage (str): ステージ名
+            vpc (ec2.Vpc): VPC
+            rds_sg (ec2.SecurityGroup): RDS用のセキュリティグループ
+        Returns:
+            rds.DatabaseInstance: RDSインスタンス
+        """
+
         db_subnet_group = rds.SubnetGroup(
             self,
-            id="db_subnet_group",
+            id=f"{app_name}_{stage}_db_subnet_group",
+            subnet_group_name=f"{app_name}-{stage}-db-subnet-group",
             description="DB subnet group",
-            subnet_group_name="db_subnet_group",
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
             ),
         )
 
-        _ = rds.DatabaseInstance(
+        return rds.DatabaseInstance(
             self,
-            "web-rds",
+            id=f"{app_name}_{stage}_rds",
+            database_name=f"{app_name}_{stage}_rds",
+            instance_identifier=f"{app_name}-{stage}-rds",
             engine=rds.DatabaseInstanceEngine.postgres(
                 version=rds.PostgresEngineVersion.VER_17_2
             ),
@@ -149,21 +207,41 @@ class WebAppStack(Stack):
             subnet_group=db_subnet_group,
         )
 
-        alb = elb.ApplicationLoadBalancer(
+    # ALBを作るメソッド
+    # ターゲットのEC2インスタンスはリストで受け取る
+
+    def create_alb(
+        self, app_name: str, stage: str, vpc: ec2.Vpc, ec2_instances: list[ec2.Instance]
+    ) -> elb.ApplicationLoadBalancer:
+        """ALBを作成する
+
+        Args:
+            app_name (str): アプリケーション名
+            stage (str): ステージ名
+            vpc (ec2.Vpc): VPC
+            ec2_instances (List[ec2.Instance]): ターゲットとなるEC2インスタンスのリスト
+        Returns:
+            elb.ApplicationLoadBalancer: ALB
+        """
+        alb: elb.ApplicationLoadBalancer = elb.ApplicationLoadBalancer(
             self,
-            "alb",
+            id=f"{app_name}_{stage}_alb",
+            load_balancer_name=f"{app_name}-{stage}-alb",
             vpc=vpc,
             internet_facing=True,
         )
+
         listener = alb.add_listener("listener", port=80)
         listener.add_targets(
             "target",
             port=80,
             targets=[
-                tg.InstanceIdTarget(instance_id=ec2_instance_1.instance_id),
-                tg.InstanceIdTarget(instance_id=ec2_instance_2.instance_id),
+                tg.InstanceIdTarget(instance_id=ec2_instance.instance_id)
+                for ec2_instance in ec2_instances
             ],
             health_check=elb.HealthCheck(
                 path="/index.html",
             ),
         )
+
+        return alb
