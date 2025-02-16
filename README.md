@@ -46,7 +46,7 @@ cdk bootstrap
 
 ```bash
 pipenv install
-cdk deploy -c app_name=sample -c stage=local -c key_pair=YOUR_KEY_PAIR_NAME
+cdk deploy -c app_name=sample -c stage=local -c key_pair=YOUR_KEY_PAIR_NAME -c certificate_arn=YOUR_ACM_ARN
 ```
 
 ## Useful commands

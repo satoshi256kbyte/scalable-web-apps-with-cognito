@@ -1,6 +1,9 @@
 from aws_cdk import Stack, Tags
+from aws_cdk import aws_certificatemanager as acm
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_elasticloadbalancingv2 as elb
+from aws_cdk import aws_elasticloadbalancingv2_actions as actions
 from aws_cdk import aws_elasticloadbalancingv2_targets as tg
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_rds as rds
@@ -29,6 +32,10 @@ class WebAppStack(Stack):
         if key_pair_param is None:
             raise ValueError("key_pair is required")
 
+        certificate_arn_param: str = self.node.try_get_context("certificate_arn")
+        if certificate_arn_param is None:
+            raise ValueError("certificate_arn is required")
+
         # 全体にタグを付与
         Tags.of(self).add("app_name", app_name)
         Tags.of(self).add("stage", stage)
@@ -49,7 +56,7 @@ class WebAppStack(Stack):
                 ),
                 ec2.SubnetConfiguration(
                     name=f"{app_name}-{stage}-protected-subnet",
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_NAT,
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
                 ),
                 ec2.SubnetConfiguration(
                     name=f"{app_name}-{stage}-private-subnet",
@@ -117,7 +124,47 @@ class WebAppStack(Stack):
         )
 
         _ = self.create_rds_instance(app_name, stage, vpc, rds_sg)
-        _ = self.create_alb(app_name, stage, vpc, [ec2_instance_1, ec2_instance_2])
+
+        user_pool: cognito.UserPool = cognito.UserPool(
+            self,
+            id=f"{app_name}_{stage}_user_pool",
+            user_pool_name=f"{app_name}-{stage}-user-pool",
+            self_sign_up_enabled=True,
+            sign_in_aliases=cognito.SignInAliases(
+                email=True,
+                username=False,
+            ),
+            auto_verify=cognito.AutoVerifiedAttrs(
+                email=True,
+            ),
+        )
+
+        user_pool_client: cognito.UserPoolClient = cognito.UserPoolClient(
+            self,
+            id=f"{app_name}_{stage}_user_pool_client",
+            user_pool=user_pool,
+            user_pool_client_name=f"{app_name}-{stage}-user-pool-client",
+            generate_secret=True,
+        )
+
+        user_pool_domain: cognito.UserPoolDomain = cognito.UserPoolDomain(
+            self,
+            "Domain",
+            user_pool=user_pool,
+            cognito_domain=cognito.CognitoDomainOptions(
+                domain_prefix=f"{app_name}-{stage}-auth",
+            ),
+        )
+
+        _ = self.create_alb(
+            app_name=app_name,
+            stage=stage,
+            vpc=vpc,
+            ec2_instances=[ec2_instance_1, ec2_instance_2],
+            user_pool=user_pool,
+            user_pool_client=user_pool_client,
+            user_pool_domain=user_pool_domain,
+        )
 
     def create_web_ec2_instance(
         self,
@@ -141,7 +188,11 @@ class WebAppStack(Stack):
             ec2.SecurityGroup: EC2インスタンス
         """
 
-        key_pair_param: str = self.node.try_get_context("key_pair")
+        # キーペア名から既存のキーペアオブジェクトを取得
+        key_pair_name: str = self.node.try_get_context("key_pair")
+        key_pair = ec2.KeyPair.from_key_pair_name(
+            self, f"{app_name}_{stage}_key_pair_{suffix}", key_pair_name
+        )
 
         return ec2.Instance(
             self,
@@ -151,10 +202,8 @@ class WebAppStack(Stack):
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.T3A, ec2.InstanceSize.MICRO
             ),
-            machine_image=ec2.MachineImage.latest_amazon_linux(
-                generation=ec2.AmazonLinuxGeneration.AMAZON_LINUX_2023
-            ),
-            key_name=key_pair_param,
+            machine_image=ec2.MachineImage.latest_amazon_linux2023(),
+            key_pair=key_pair,
             block_devices=[
                 ec2.BlockDevice(
                     device_name="/dev/xvda", volume=ec2.BlockDeviceVolume.ebs(10)
@@ -211,7 +260,14 @@ class WebAppStack(Stack):
     # ターゲットのEC2インスタンスはリストで受け取る
 
     def create_alb(
-        self, app_name: str, stage: str, vpc: ec2.Vpc, ec2_instances: list[ec2.Instance]
+        self,
+        app_name: str,
+        stage: str,
+        vpc: ec2.Vpc,
+        ec2_instances: list[ec2.Instance],
+        user_pool: cognito.UserPool,
+        user_pool_client: cognito.UserPoolClient,
+        user_pool_domain: cognito.UserPoolDomain,
     ) -> elb.ApplicationLoadBalancer:
         """ALBを作成する
 
@@ -220,6 +276,9 @@ class WebAppStack(Stack):
             stage (str): ステージ名
             vpc (ec2.Vpc): VPC
             ec2_instances (List[ec2.Instance]): ターゲットとなるEC2インスタンスのリスト
+            user_pool (cognito.UserPool): Cognito User Pool
+            user_pool_client (cognito.UserPoolClient): Cognito User Pool Client
+            user_pool_domain (cognito.UserPoolDomain): Cognito User Pool Domain
         Returns:
             elb.ApplicationLoadBalancer: ALB
         """
@@ -231,17 +290,47 @@ class WebAppStack(Stack):
             internet_facing=True,
         )
 
-        listener = alb.add_listener("listener", port=80)
-        listener.add_targets(
-            "target",
+        certificate_arn: str = self.node.try_get_context("certificate_arn")
+        certificate: acm.Certificate = acm.Certificate.from_certificate_arn(
+            self, f"{app_name}_{stage}_certificate", certificate_arn
+        )
+
+        # ターゲットグループの作成
+        target_group: elb.ApplicationTargetGroup = elb.ApplicationTargetGroup(
+            self,
+            id=f"{app_name}_{stage}_target_group",
+            target_group_name=f"{app_name}-{stage}-target-group",
             port=80,
+            vpc=vpc,
+            protocol=elb.ApplicationProtocol.HTTP,
             targets=[
                 tg.InstanceIdTarget(instance_id=ec2_instance.instance_id)
                 for ec2_instance in ec2_instances
             ],
             health_check=elb.HealthCheck(
-                path="/index.html",
+                path="/",
             ),
+        )
+
+        listener = alb.add_listener("listener", port=443, certificates=[certificate])
+        # `/member/`から始まるURLの場合、Cognito認証を適用
+        listener.add_action(
+            id=f"{app_name}_{stage}_auth_action",
+            priority=1,  # 優先順位（低いほど優先される）
+            conditions=[
+                elb.ListenerCondition.path_patterns(["/member/*"]),
+            ],
+            action=actions.AuthenticateCognitoAction(
+                user_pool=user_pool,
+                user_pool_client=user_pool_client,
+                user_pool_domain=user_pool_domain,
+                next=elb.ListenerAction.forward([target_group]),
+            ),
+        )
+
+        # それ以外のURLはそのままターゲットグループにフォワード
+        listener.add_target_groups(
+            id=f"{app_name}_{stage}_default_action", target_groups=[target_group]
         )
 
         return alb
