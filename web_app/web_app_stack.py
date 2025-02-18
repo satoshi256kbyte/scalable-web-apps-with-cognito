@@ -1,5 +1,7 @@
 from aws_cdk import Stack, Tags
+from aws_cdk import aws_apigateway as apigw
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as _lambda
 from constructs import Construct
 
 from web_app.lib.cognito.simple_user_pool import SimpleUserPool
@@ -100,4 +102,20 @@ class WebAppStack(Stack):
             user_pool_client=simple_user_pool.get_user_pool_client(),
             user_pool_domain=simple_user_pool.get_user_pool_domain(),
             certificate_arn=certificate_arn_param,
+        )
+
+        fn = _lambda.Function(
+            self,
+            id=f"{app_name}_{stage}_lambda_handler",
+            function_name=f"{app_name}-{stage}-lambda-handler",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="hello_world.handler",
+            code=_lambda.Code.from_asset("src"),
+        )
+
+        _ = apigw.LambdaRestApi(
+            self,
+            id=f"{app_name}_{stage}_api",
+            handler=fn,
+            rest_api_name=f"{app_name}-{stage}-api",
         )
