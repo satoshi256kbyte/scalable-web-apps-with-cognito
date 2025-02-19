@@ -33,6 +33,21 @@ def create_web_ec2_instance(
         scope, f"{app_name}_{stage}_key_pair_{suffix}", key_pair_name
     )
 
+    user_data=ec2.UserData.for_linux()
+    user_data.add_commands("dnf update -y")
+    user_data.add_commands("dnf install -y wget")
+    user_data.add_commands("cd")
+    user_data.add_commands("wget https://aws-codedeploy-ap-northeast-1.s3.ap-northeast-1.amazonaws.com/latest/install")
+    user_data.add_commands("chmod +x ./install")
+    user_data.add_commands("sudo ./install auto")
+    user_data.add_commands("dnf install -y httpd wget php-fpm php-mysqli php-json php php-devel")
+    user_data.add_commands("systemctl enable codedeploy-agent")
+    user_data.add_commands("systemctl start codedeploy-agent")
+    
+    user_data.add_commands("systemctl start httpd")
+    user_data.add_commands("systemctl enable httpd")
+    user_data.add_commands("echo 'Health check' > /var/www/html/health_check.html")
+
     return ec2.Instance(
         scope,
         id=f"{app_name}_{stage}_web_ec2_{suffix}",
@@ -50,4 +65,6 @@ def create_web_ec2_instance(
         ],
         role=instance_profile,
         security_group=security_group,
+        # UserDataの使ってインスタンス起動時にスクリプトを実行、CodeDeployAgentとApacheをインストール
+        user_data=user_data
     )
