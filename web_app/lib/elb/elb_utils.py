@@ -61,7 +61,8 @@ def create_alb_instance(
             for ec2_instance in ec2_instances
         ],
         health_check=elb.HealthCheck(
-            path="/",
+            path="/health_check.html",
+            protocol=elb.Protocol.HTTP,
         ),
     )
 
