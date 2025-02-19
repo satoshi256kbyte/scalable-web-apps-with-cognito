@@ -41,11 +41,11 @@ class WebAppStack(Stack):
         Tags.of(self).add("app_name", app_name)
         Tags.of(self).add("stage", stage)
 
-        simple_vpc: SimpleWebAppVPC = SimpleWebAppVPC(self, app_name, stage)
+        simple_vpc = SimpleWebAppVPC(self, app_name, stage)
 
         # EC2用のインスタンスプロファイル
         # セッションマネージャーを使うためのマネージドポリシーをアタッチ
-        instance_profile: iam.Role = iam.Role(
+        instance_profile = iam.Role(
             scope=self,
             id=f"{app_name}_{stage}_web_ec2_role",
             role_name=f"{app_name}-{stage}-web-ec2-role",
@@ -80,16 +80,18 @@ class WebAppStack(Stack):
             key_pair_name=key_pair_param,
         )
 
-        _ = create_rds_instance(
+        db = create_rds_instance(
             scope=self,
             app_name=app_name,
             stage=stage,
             vpc=simple_vpc.get_vpc(),
             security_group=simple_vpc.get_db_sg(),
         )
+        print(f"DB master username: {db.secret.secret_value_from_json('username')}")
+        print(f"DB master password: {db.secret.secret_value_from_json('password')}")
 
         # Cognitoユーザープールを作成
-        simple_user_pool: SimpleUserPool = SimpleUserPool(self, app_name, stage)
+        simple_user_pool = SimpleUserPool(self, app_name, stage)
 
         _ = create_alb_instance(
             scope=self,
@@ -113,9 +115,23 @@ class WebAppStack(Stack):
             code=_lambda.Code.from_asset("src"),
         )
 
-        _ = apigw.LambdaRestApi(
+        # API Gatewayを作成
+        # ALBに設定したものと同じCognito認証を設定する
+        cognito_authorizer = apigw.CognitoUserPoolsAuthorizer(
+            self,
+            id=f"{app_name}_{stage}_cognito_authorizer",
+            cognito_user_pools=[simple_user_pool.get_user_pool()],
+            authorizer_name=f"{app_name}-{stage}-cognito-authorizer",
+        )
+
+        rest_api = apigw.RestApi(
             self,
             id=f"{app_name}_{stage}_api",
-            handler=fn,
             rest_api_name=f"{app_name}-{stage}-api",
+        )
+
+        rest_api.root.add_method(
+            "GET",
+            apigw.LambdaIntegration(fn),
+            authorizer=cognito_authorizer,
         )

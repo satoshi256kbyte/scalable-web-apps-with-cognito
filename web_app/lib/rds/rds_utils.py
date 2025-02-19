@@ -40,7 +40,7 @@ def create_rds_instance(
             version=rds.PostgresEngineVersion.VER_17_2
         ),
         instance_type=ec2.InstanceType.of(
-            instance_class=ec2.InstanceClass.BURSTABLE3,
+            instance_class=ec2.InstanceClass.BURSTABLE4_GRAVITON,
             instance_size=ec2.InstanceSize.MICRO,
         ),
         vpc=vpc,
