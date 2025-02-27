@@ -77,7 +77,7 @@ class SimpleWebAppVPC(Construct):
         )
         self._db_sg.add_ingress_rule(
             peer=self._web_sg,
-            connection=ec2.Port.tcp(3306),
+            connection=ec2.Port.tcp(5432),
         )
 
     def get_vpc(self) -> ec2.Vpc:
