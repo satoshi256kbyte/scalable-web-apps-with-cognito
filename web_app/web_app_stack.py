@@ -80,16 +80,14 @@ class WebAppStack(Stack):
             key_pair_name=key_pair_param,
         )
 
-        db = create_rds_instance(
+        _ = create_rds_instance(
             scope=self,
             app_name=app_name,
             stage=stage,
             vpc=simple_vpc.get_vpc(),
             security_group=simple_vpc.get_db_sg(),
         )
-        print(f"DB master username: {db.secret.secret_value_from_json('username')}")
-        print(f"DB master password: {db.secret.secret_value_from_json('password')}")
-
+        
         # Cognitoユーザープールを作成
         simple_user_pool = SimpleUserPool(self, app_name, stage)
 
